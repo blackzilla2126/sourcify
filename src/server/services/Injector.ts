@@ -1,69 +1,57 @@
 import Web3 from 'web3';
 import path from 'path';
-import Logger from 'bunyan';
-import * as chainOptions from './chains.json';
+import { Logger } from '../../utils/logger/Logger';
+import * as bunyan from 'bunyan';
+import { Match, RecompilationResult, InputData, StringMap } from '../../common/types';
+import { FileService } from '../services/FileService';
 // tslint:disable no-unused-variable
 import fs from 'fs'
 
 // tslint:disable no-commented-code
 // import { findAddresses } from './address-db';
 
-const multihashes : any = require('multihashes');
+const multihashes: any = require('multihashes');
 
 import {
   cborDecode,
   getBytecode,
   recompile,
-  RecompilationResult,
   getBytecodeWithoutMetadata as trimMetadata,
-  InputData,
-  Match,
-  getChainByName,
   save
-} from './utils';
-
-import {
-  NotFound
-} from './errorHandler';
-
-declare interface StringMap {
-  [key: string]: string;
-}
+} from '../../utils/Utils';
+import { NotFoundError } from '../../common/errors';
 
 export interface InjectorConfig {
-  infuraPID? : string,
-  localChainUrl? : string,
-  silent? : boolean,
-  log? : Logger,
+  infuraPID?: string,
+  localChainUrl?: string,
+  silent?: boolean,
+  log?: bunyan,
   offline?: boolean
 }
 
 export default class Injector {
-  private log : Logger;
-  private chains : any;
-  private infuraPID : string;
+  private log: bunyan;
+  private chains: any;
+  private infuraPID: string;
   private localChainUrl: string | undefined;
   private offline: boolean;
+  public fileService: FileService;
 
   /**
    * Constructor
    * @param {InjectorConfig = {}} config
    */
-  public constructor(config : InjectorConfig = {}){
+  public constructor(config: InjectorConfig = {}) {
     this.chains = {};
     this.infuraPID = config.infuraPID || "changeinfuraid";
     this.localChainUrl = config.localChainUrl;
     this.offline = config.offline || false;
 
-    this.log = config.log || Logger.createLogger({
-      name: "Injector",
-      streams: [{
-        stream: process.stdout,
-        level: config.silent ? 'fatal' : 30
-      }]
-    });
+    this.log = config.log || Logger("Injector");
 
-    if (!this.offline){
+    this.fileService = new FileService(this.log);
+
+    if (!this.offline) {
       this.initChains();
     }
   }
@@ -72,9 +60,9 @@ export default class Injector {
    * Instantiates a web3 provider for all public ethereum networks via Infura.
    * If environment variable TESTING is set to true, localhost:8545 is also available.
    */
-  private initChains(){
-    for (const chain of ['mainnet', 'ropsten', 'rinkeby', 'kovan', 'goerli']){
-      const chainOption = getChainByName(chain);
+  private initChains() {
+    for (const chain of ['mainnet', 'ropsten', 'rinkeby', 'kovan', 'goerli']) {
+      const chainOption = this.fileService.getChainByName(chain);
       this.chains[chainOption.chainId] = {};
       if (this.infuraPID === "changeinfuraid") {
         const web3 = chainOption.fullnode.dappnode;
@@ -86,8 +74,8 @@ export default class Injector {
     }
 
     // For unit testing with testrpc...
-    if (this.localChainUrl){
-      const chainOption = getChainByName('localhost');
+    if (this.localChainUrl) {
+      const chainOption = this.fileService.getChainByName('localhost');
       this.chains[chainOption.chainId] = {
         web3: new Web3(chainOption.web3[0])
       };
@@ -99,7 +87,7 @@ export default class Injector {
    * @param  {string[]} files
    * @return {string[]}         metadata
    */
-  private findMetadataFiles(files: string[]) : any[] {
+  private findMetadataFiles(files: string[]): any[] {
     const metadataFiles = [];
 
     for (const i in files) {
@@ -115,9 +103,9 @@ export default class Injector {
       } catch (err) { /* ignore */ }
     }
 
-    if(!metadataFiles.length){
+    if (!metadataFiles.length) {
       const err = new Error("Metadata file not found. Did you include \"metadata.json\"?");
-      this.log.info({loc:'[FIND]', err: err});
+      this.log.info({ loc: '[FIND]', err: err });
       throw err;
     }
 
@@ -129,7 +117,7 @@ export default class Injector {
    * @param  {string[]}  files sources
    * @return {StringMap}
    */
-  private storeByHash(files: string[]) : StringMap {
+  private storeByHash(files: string[]): StringMap {
     const byHash: StringMap = {};
 
     for (const i in files) {
@@ -145,19 +133,19 @@ export default class Injector {
    * @param  {string[]}  files    source files
    * @return {StringMap}
    */
-  private rearrangeSources(metadata : any, files: string[]) : StringMap {
+  private rearrangeSources(metadata: any, files: string[]): StringMap {
     const sources: StringMap = {}
     const byHash = this.storeByHash(files);
 
     for (const fileName in metadata.sources) {
       let content: string = metadata.sources[fileName].content;
       const hash: string = metadata.sources[fileName].keccak256;
-      if(content) {
-          if (Web3.utils.keccak256(content) != hash) {
-              const err = new Error(`Invalid content for file ${fileName}`);
-              this.log.info({ loc: '[REARRANGE]', fileName: fileName, err: err});
-              throw err;
-          }
+      if (content) {
+        if (Web3.utils.keccak256(content) != hash) {
+          const err = new Error(`Invalid content for file ${fileName}`);
+          this.log.info({ loc: '[REARRANGE]', fileName: fileName, err: err });
+          throw err;
+        }
       } else {
         content = byHash[hash];
       }
@@ -167,23 +155,13 @@ export default class Injector {
           `that cannot be found in your upload.\nIts keccak256 hash is ${hash}. ` +
           `Please try to find it and include it in the upload.`
         );
-        this.log.info({loc: '[REARRANGE]', fileName: fileName, err: err});
+        this.log.info({ loc: '[REARRANGE]', fileName: fileName, err: err });
         throw err;
       }
       sources[fileName] = content;
     }
     return sources
   }
-
-  private getIdFromChainName(chain: string): number {
-    for(const chainOption in chainOptions) {
-      if(chainOptions[chainOption].network === chain){
-        return chainOptions[chainOption].chainId;
-      }
-    }
-    throw new NotFound("Chain not found!"); //TODO: should we throw an error here or just let it pass?
-  }
-
 
   /**
    * Writes verified sources to repository by address and by ipfs | swarm hash
@@ -195,13 +173,13 @@ export default class Injector {
    */
   private storePerfectMatchData(
     repository: string,
-    chain : string,
-    address : string,
-    compilationResult : RecompilationResult,
+    chain: string,
+    address: string,
+    compilationResult: RecompilationResult,
     sources: StringMap
-  ) : void {
+  ): void {
 
-    let metadataPath : string;
+    let metadataPath: string;
     const bytes = Web3.utils.hexToBytes(compilationResult.deployedBytecode);
     const cborData = cborDecode(bytes);
 
@@ -217,7 +195,7 @@ export default class Injector {
       );
 
       this.log.info({
-        loc:'[STOREDATA]',
+        loc: '[STOREDATA]',
         address: address,
         chain: chain,
         err: err
@@ -228,12 +206,12 @@ export default class Injector {
 
     const hashPath = path.join(repository, metadataPath);
     const addressPath = path.join(
-        repository,
-        'contracts',
-        'full_match',
-        chain,
-        address,
-        '/metadata.json'
+      repository,
+      'contracts',
+      'full_match',
+      chain,
+      address,
+      '/metadata.json'
     );
 
     save(hashPath, compilationResult.metadata);
@@ -271,11 +249,11 @@ export default class Injector {
    */
   private storePartialMatchData(
     repository: string,
-    chain : string,
-    address : string,
-    compilationResult : RecompilationResult,
+    chain: string,
+    address: string,
+    compilationResult: RecompilationResult,
     sources: StringMap
-  ) : void {
+  ): void {
 
     const addressPath = path.join(
       repository,
@@ -318,13 +296,13 @@ export default class Injector {
     chain: string,
     addresses: string[] = [],
     compiledBytecode: string
-  ) : Promise<Match> {
-    let match : Match = { address: null, status: null };
+  ): Promise<Match> {
+    let match: Match = { address: null, status: null };
 
-    for (let address of addresses){
+    for (let address of addresses) {
       address = Web3.utils.toChecksumAddress(address)
 
-      let deployedBytecode : string | null = null;
+      let deployedBytecode: string | null = null;
       try {
         this.log.info(
           {
@@ -335,11 +313,11 @@ export default class Injector {
           `Retrieving contract bytecode address`
         );
         deployedBytecode = await getBytecode(this.chains[chain].web3, address)
-      } catch(e){ /* ignore */ }
+      } catch (e) { /* ignore */ }
 
       const status = this.compareBytecodes(deployedBytecode, compiledBytecode);
 
-      if (status){
+      if (status) {
         match = { address: address, status: status };
         break;
       }
@@ -358,14 +336,14 @@ export default class Injector {
   private compareBytecodes(
     deployedBytecode: string | null,
     compiledBytecode: string
-  ) : 'perfect' | 'partial' | null {
+  ): 'perfect' | 'partial' | null {
 
-    if (deployedBytecode && deployedBytecode.length > 2){
-      if (deployedBytecode === compiledBytecode){
+    if (deployedBytecode && deployedBytecode.length > 2) {
+      if (deployedBytecode === compiledBytecode) {
         return 'perfect';
       }
 
-      if (trimMetadata(deployedBytecode) === trimMetadata(compiledBytecode)){
+      if (trimMetadata(deployedBytecode) === trimMetadata(compiledBytecode)) {
         return 'partial';
       }
     }
@@ -376,14 +354,14 @@ export default class Injector {
    * Throws if addresses array contains a null value (express) or is length 0
    * @param {string[] = []} addresses param (submitted to injector)
    */
-  private validateAddresses(addresses: string[] = []){
+  private validateAddresses(addresses: string[] = []) {
     const err = new Error("Missing address for submitted sources/metadata");
 
-    if (!addresses.length){
+    if (!addresses.length) {
       throw err;
     }
 
-    for (const address of addresses ){
+    for (const address of addresses) {
       if (address == null) throw err;
     }
   }
@@ -392,12 +370,12 @@ export default class Injector {
    * Throws if `chain` is falsy or wrong type
    * @param {string} chain param (submitted to injector)
    */
-  private validateChain(chain: string){
-    const err = new Error("Missing chain name for submitted sources/metadata");
-
-    if (!chain || typeof chain !== 'string'){
-      throw err;
+  private validateChain(chain: string) {
+    
+    if (!chain || typeof chain !== 'string') {
+      throw new Error("Missing chain name for submitted sources/metadata");;
     }
+    
   }
 
   /**
@@ -412,7 +390,7 @@ export default class Injector {
    */
   public async inject(
     inputData: InputData
-  ) : Promise<Match> {
+  ): Promise<Match> {
     const { repository, chain, addresses, files } = inputData;
     this.validateAddresses(addresses);
     this.validateChain(chain);
@@ -424,24 +402,24 @@ export default class Injector {
       status: null
     };
 
-    for (const metadata of metadataFiles){
+    for (const metadata of metadataFiles) {
       const sources = this.rearrangeSources(metadata, files)
 
       // Starting from here, we cannot trust the metadata object anymore,
       // because it is modified inside recompile.
       const target = Object.assign({}, metadata.settings.compilationTarget);
 
-      let compilationResult : RecompilationResult;
+      let compilationResult: RecompilationResult;
       try {
         compilationResult = await recompile(metadata, sources, this.log)
-      } catch(err) {
-        this.log.info({loc: `[RECOMPILE]`, err: err});
+      } catch (err) {
+        this.log.info({ loc: `[RECOMPILE]`, err: err });
         throw err;
       }
 
       // When injector is called by monitor, the bytecode has already been
       // obtained for address and we only need to compare w/ compilation result.
-      if (inputData.bytecode){
+      if (inputData.bytecode) {
 
         const status = this.compareBytecodes(
           inputData.bytecode,
@@ -453,8 +431,8 @@ export default class Injector {
           status: status
         }
 
-      // For other cases, we need to retrieve the code for specified address
-      // from the chain.
+        // For other cases, we need to retrieve the code for specified address
+        // from the chain.
       } else {
         match = await this.matchBytecodeToAddress(
           chain,
@@ -471,7 +449,7 @@ export default class Injector {
 
         this.storePerfectMatchData(repository, chain, match.address, compilationResult, sources)
 
-      } else if (match.address && match.status === 'partial'){
+      } else if (match.address && match.status === 'partial') {
 
         this.storePartialMatchData(repository, chain, match.address, compilationResult, sources)
 
@@ -490,7 +468,7 @@ export default class Injector {
           err: err
         })
 
-        throw new NotFound(err.message);
+        throw new NotFoundError(err.message);
       }
     }
     return match;
